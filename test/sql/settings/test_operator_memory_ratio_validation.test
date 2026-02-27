@@ -1,0 +1,113 @@
+# name: test/sql/settings/test_operator_memory_ratio_validation.test
+# description: Test operator memory ratio validation (warning and reset to defaults when out of range)
+# group: [settings]
+
+# Test that invalid ratios get reset to defaults when enabling optimizations
+# Set an invalid ratio (greater than 1.0)
+statement ok
+SET GLOBAL operator_sort_input_buffer_ratio=1.5;
+
+# The value is set (no validation until enable)
+query I
+SELECT current_setting('operator_sort_input_buffer_ratio');
+----
+1.5
+
+# When we enable optimizations, it should reset to default and warn
+# Note: The warning is printed but doesn't fail the statement
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+# The ratio should now be reset to default 0.5
+query I
+SELECT current_setting('operator_sort_input_buffer_ratio');
+----
+0.5
+
+statement ok
+SET GLOBAL operator_memory_optimizations=false;
+
+# Test negative ratio
+statement ok
+SET GLOBAL operator_nlj_input_buffer_ratio=-0.5;
+
+query I
+SELECT current_setting('operator_nlj_input_buffer_ratio');
+----
+-0.5
+
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+# Should be reset to default 0.75
+query I
+SELECT current_setting('operator_nlj_input_buffer_ratio');
+----
+0.75
+
+statement ok
+SET GLOBAL operator_memory_optimizations=false;
+
+# Test short table ratio out of range
+statement ok
+SET GLOBAL operator_nlj_short_table_buffer_ratio=2.0;
+
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+# Should be reset to default 0.5
+query I
+SELECT current_setting('operator_nlj_short_table_buffer_ratio');
+----
+0.5
+
+statement ok
+SET GLOBAL operator_memory_optimizations=false;
+
+# Test k-way merge k below minimum
+statement ok
+SET GLOBAL operator_kway_merge_k=1;
+
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+# Should be reset to default 4
+query I
+SELECT current_setting('operator_kway_merge_k');
+----
+4
+
+statement ok
+SET GLOBAL operator_memory_optimizations=false;
+
+# Test k-way merge input ratio out of range
+statement ok
+SET GLOBAL operator_kway_merge_input_buffer_ratio=-0.1;
+
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+# Should be reset to default 0.67
+query I
+SELECT current_setting('operator_kway_merge_input_buffer_ratio');
+----
+0.67
+
+# Clean up
+statement ok
+SET GLOBAL operator_memory_optimizations=false;
+
+statement ok
+RESET operator_sort_input_buffer_ratio;
+
+statement ok
+RESET operator_nlj_input_buffer_ratio;
+
+statement ok
+RESET operator_nlj_short_table_buffer_ratio;
+
+statement ok
+RESET operator_kway_merge_k;
+
+statement ok
+RESET operator_kway_merge_input_buffer_ratio;

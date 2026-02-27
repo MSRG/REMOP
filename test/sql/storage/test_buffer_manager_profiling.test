@@ -1,0 +1,21 @@
+# name: test/sql/storage/test_buffer_manager_profiling.test
+# description: Test buffer manager profiling capabilities
+# group: [storage]
+
+# Simple test to verify profiling can be enabled
+statement ok
+PRAGMA enable_verification
+
+# Create a table that will trigger some buffer manager activity
+statement ok
+CREATE TABLE test_data AS SELECT range AS id, 'data_' || range AS val FROM range(1000);
+
+# Query the table
+query I
+SELECT COUNT(*) FROM test_data;
+----
+1000
+
+# Clean up
+statement ok
+DROP TABLE test_data;

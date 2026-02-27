@@ -1,0 +1,299 @@
+# name: test/sql/join/test_result_buffering_nlj.test
+# description: Test result buffering mechanism for blocked nested loop join
+# group: [join]
+
+statement ok
+PRAGMA enable_verification
+
+# Enable operator memory optimizations to use the optimized NLJ
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+#===--------------------------------------------------------------------===//
+# Test 1: Many-to-many join producing many results
+# Tests that result buffering handles high cardinality output correctly
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE lhs_many AS SELECT i AS a, 'lhs_' || i AS b FROM range(200) t(i);
+
+statement ok
+CREATE TABLE rhs_many AS SELECT i AS c, 'rhs_' || i AS d FROM range(150) t(i);
+
+# This join produces: for each lhs row, it matches all rhs rows except one
+# Total: 200 * 150 - min(200, 150) = 30000 - 150 = 29850 rows
+query I
+SELECT COUNT(*) FROM lhs_many INNER JOIN rhs_many ON lhs_many.a IS DISTINCT FROM rhs_many.c;
+----
+29850
+
+# Verify a sample of results - first few mismatches for a=0
+query IIII rowsort
+SELECT * FROM lhs_many INNER JOIN rhs_many ON lhs_many.a IS DISTINCT FROM rhs_many.c
+WHERE a = 0 AND c < 5
+ORDER BY a, c;
+----
+0	lhs_0	1	rhs_1
+0	lhs_0	2	rhs_2
+0	lhs_0	3	rhs_3
+0	lhs_0	4	rhs_4
+
+#===--------------------------------------------------------------------===//
+# Test 2: Cross join pattern (all vs all)
+# Maximum output cardinality, tests buffer fill/drain cycles
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE cross_lhs AS SELECT i AS x FROM range(50) t(i);
+
+statement ok
+CREATE TABLE cross_rhs AS SELECT i AS y FROM range(60) t(i);
+
+# Using condition that's always true for distinct values
+# (x-1000) IS DISTINCT FROM y will always be true since x < 50 and y < 60
+query I
+SELECT COUNT(*) FROM cross_lhs CROSS JOIN cross_rhs;
+----
+3000
+
+# Verify cross join behavior with actual cross join
+query I
+SELECT COUNT(*) FROM cross_lhs, cross_rhs;
+----
+3000
+
+#===--------------------------------------------------------------------===//
+# Test 3: Large batches - multiple buffer fill cycles
+# Tests the drain-then-add pattern with multiple cycles
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE big_lhs AS SELECT i AS id, 'big_lhs_row_' || i AS val FROM range(500) t(i);
+
+statement ok
+CREATE TABLE big_rhs AS SELECT i AS id, 'big_rhs_row_' || i AS val FROM range(400) t(i);
+
+# Forces NLJ with IS DISTINCT FROM
+# Count: 500 * 400 - min(500, 400) = 200000 - 400 = 199600
+query I
+SELECT COUNT(*) FROM big_lhs INNER JOIN big_rhs ON big_lhs.id IS DISTINCT FROM big_rhs.id;
+----
+199600
+
+# Verify aggregation still works
+query I
+SELECT SUM(big_lhs.id + big_rhs.id) FROM big_lhs INNER JOIN big_rhs ON big_lhs.id IS DISTINCT FROM big_rhs.id;
+----
+89640400
+
+#===--------------------------------------------------------------------===//
+# Test 4: Result with multiple columns
+# Tests that multi-column results are buffered correctly
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE multi_col_lhs(a INT, b VARCHAR, c DOUBLE, d BIGINT);
+
+statement ok
+CREATE TABLE multi_col_rhs(e INT, f VARCHAR, g DOUBLE, h BIGINT);
+
+statement ok
+INSERT INTO multi_col_lhs SELECT i, 'str_' || i, i * 1.5, i * 1000 FROM range(100) t(i);
+
+statement ok
+INSERT INTO multi_col_rhs SELECT i, 'data_' || i, i * 2.5, i * 2000 FROM range(80) t(i);
+
+# Verify all columns are correctly passed through
+query I
+SELECT COUNT(*) FROM multi_col_lhs INNER JOIN multi_col_rhs ON multi_col_lhs.a IS DISTINCT FROM multi_col_rhs.e;
+----
+7920
+
+# Check specific row values
+query ITRIRT rowsort
+SELECT a, b, c, e, f, g FROM multi_col_lhs INNER JOIN multi_col_rhs ON multi_col_lhs.a IS DISTINCT FROM multi_col_rhs.e
+WHERE a = 50 AND e < 3
+ORDER BY a, e;
+----
+50	str_50	75.0	0	data_0	0.0
+50	str_50	75.0	1	data_1	2.5
+50	str_50	75.0	2	data_2	5.0
+
+#===--------------------------------------------------------------------===//
+# Test 5: NULL handling in result buffering
+# Tests that NULLs are correctly buffered and returned
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE null_lhs(x INT);
+
+statement ok
+CREATE TABLE null_rhs(y INT);
+
+statement ok
+INSERT INTO null_lhs VALUES (1), (2), (NULL), (NULL), (3);
+
+statement ok
+INSERT INTO null_rhs VALUES (1), (NULL), (2), (NULL);
+
+# IS DISTINCT FROM: NULL IS DISTINCT FROM NULL = false
+# NULL IS DISTINCT FROM non-NULL = true
+# non-NULL IS DISTINCT FROM NULL = true
+query II rowsort
+SELECT * FROM null_lhs INNER JOIN null_rhs ON null_lhs.x IS DISTINCT FROM null_rhs.y;
+----
+1	2
+1	NULL
+1	NULL
+2	1
+2	NULL
+2	NULL
+3	1
+3	2
+3	NULL
+3	NULL
+NULL	1
+NULL	1
+NULL	2
+NULL	2
+
+query I
+SELECT COUNT(*) FROM null_lhs INNER JOIN null_rhs ON null_lhs.x IS DISTINCT FROM null_rhs.y;
+----
+14
+
+#===--------------------------------------------------------------------===//
+# Test 6: Sequential queries (buffer reuse)
+# Tests that state is properly reset between queries
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE seq_a AS SELECT i AS v FROM range(30) t(i);
+
+statement ok
+CREATE TABLE seq_b AS SELECT i AS w FROM range(25) t(i);
+
+# Run multiple queries to verify buffer cleanup between queries
+query I
+SELECT COUNT(*) FROM seq_a INNER JOIN seq_b ON seq_a.v IS DISTINCT FROM seq_b.w;
+----
+725
+
+query I
+SELECT COUNT(*) FROM seq_a INNER JOIN seq_b ON seq_a.v IS DISTINCT FROM seq_b.w;
+----
+725
+
+query I
+SELECT SUM(v + w) FROM seq_a INNER JOIN seq_b ON seq_a.v IS DISTINCT FROM seq_b.w;
+----
+19275
+
+#===--------------------------------------------------------------------===//
+# Test 7: Very small result set (buffer never fills)
+# Tests that partial buffer is properly drained
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE tiny_l(p INT);
+
+statement ok
+CREATE TABLE tiny_r(q INT);
+
+statement ok
+INSERT INTO tiny_l VALUES (1), (2);
+
+statement ok
+INSERT INTO tiny_r VALUES (1);
+
+query II rowsort
+SELECT * FROM tiny_l INNER JOIN tiny_r ON tiny_l.p IS DISTINCT FROM tiny_r.q;
+----
+2	1
+
+#===--------------------------------------------------------------------===//
+# Test 8: Empty result (no matches)
+# Tests that empty buffer is handled correctly
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE same_l(val INT);
+
+statement ok
+CREATE TABLE same_r(val INT);
+
+statement ok
+INSERT INTO same_l VALUES (1), (2), (3);
+
+statement ok
+INSERT INTO same_r VALUES (1), (2), (3);
+
+# IS NOT DISTINCT FROM would produce matches, IS DISTINCT FROM should give count = 6
+query I
+SELECT COUNT(*) FROM same_l INNER JOIN same_r ON same_l.val IS DISTINCT FROM same_r.val;
+----
+6
+
+# Verify actual results
+query II rowsort
+SELECT * FROM same_l INNER JOIN same_r ON same_l.val IS DISTINCT FROM same_r.val;
+----
+1	2
+1	3
+2	1
+2	3
+3	1
+3	2
+
+#===--------------------------------------------------------------------===//
+# Test 9: ORDER BY after join (result buffering + sorting)
+# Tests interaction with downstream operators
+#===--------------------------------------------------------------------===//
+query IIII
+SELECT * FROM lhs_many INNER JOIN rhs_many ON lhs_many.a IS DISTINCT FROM rhs_many.c
+WHERE a < 3 AND c < 3
+ORDER BY a, c;
+----
+0	lhs_0	1	rhs_1
+0	lhs_0	2	rhs_2
+1	lhs_1	0	rhs_0
+1	lhs_1	2	rhs_2
+2	lhs_2	0	rhs_0
+2	lhs_2	1	rhs_1
+
+#===--------------------------------------------------------------------===//
+# Test 10: LIMIT after join
+# Tests early termination with result buffering
+#===--------------------------------------------------------------------===//
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM lhs_many INNER JOIN rhs_many ON lhs_many.a IS DISTINCT FROM rhs_many.c
+    LIMIT 100
+);
+----
+100
+
+query I
+SELECT COUNT(*) FROM (
+    SELECT * FROM big_lhs INNER JOIN big_rhs ON big_lhs.id IS DISTINCT FROM big_rhs.id
+    LIMIT 1000
+);
+----
+1000
+
+#===--------------------------------------------------------------------===//
+# Test 11: Complex expression in join condition
+# Tests that result buffering works with complex predicates
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE expr_l(a INT, b INT);
+
+statement ok
+CREATE TABLE expr_r(c INT, d INT);
+
+statement ok
+INSERT INTO expr_l SELECT i, i * 2 FROM range(50) t(i);
+
+statement ok
+INSERT INTO expr_r SELECT i, i * 3 FROM range(40) t(i);
+
+# Complex condition: (a + b) IS DISTINCT FROM (c + d)
+# a + b = i + 2i = 3i
+# c + d = i + 3i = 4i
+# These are always distinct for i > 0, equal only when both are 0
+query I
+SELECT COUNT(*) FROM expr_l INNER JOIN expr_r ON (expr_l.a + expr_l.b) IS DISTINCT FROM (expr_r.c + expr_r.d);
+----
+1987

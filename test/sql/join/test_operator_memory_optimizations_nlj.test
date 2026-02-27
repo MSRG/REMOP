@@ -1,0 +1,114 @@
+# name: test/sql/join/test_operator_memory_optimizations_nlj.test
+# description: Test operator memory optimization flag enables optimized nested loop join operators
+# group: [join]
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CREATE TABLE t1 AS SELECT * FROM VALUES (1, 2), (2, 4), (3, 8), (6, 25), (1, 25) t(a, b);
+
+statement ok
+CREATE TABLE t2 AS SELECT * FROM VALUES (4), (5) t(c);
+
+# Default: uses regular BLOCKWISE_NL_JOIN operator
+query II
+EXPLAIN SELECT * FROM t1 ANTI JOIN t2 ON t1.a < t2.c AND t1.b < t2.c;
+----
+physical_plan	<REGEX>:.*BLOCKWISE_NL_JOIN[^_].*
+
+# Verify result with default operator
+query II
+SELECT * FROM t1 ANTI JOIN t2 ON t1.a < t2.c AND t1.b < t2.c ORDER BY ALL;
+----
+1	25
+3	8
+6	25
+
+# Enable operator memory optimizations (now a global setting)
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+# With optimization enabled: uses optimized BLOCKWISE_NL_JOIN_OPTIMIZED operator
+query II
+EXPLAIN SELECT * FROM t1 ANTI JOIN t2 ON t1.a < t2.c AND t1.b < t2.c;
+----
+physical_plan	<REGEX>:.*BLOCKWISE_NL_JOIN_OPTIMIZED.*
+
+# Results should be identical with optimized operator
+query II
+SELECT * FROM t1 ANTI JOIN t2 ON t1.a < t2.c AND t1.b < t2.c ORDER BY ALL;
+----
+1	25
+3	8
+6	25
+
+# Reset and verify it goes back to regular operator
+statement ok
+RESET operator_memory_optimizations;
+
+query II
+EXPLAIN SELECT * FROM t1 ANTI JOIN t2 ON t1.a < t2.c AND t1.b < t2.c;
+----
+physical_plan	<REGEX>:.*BLOCKWISE_NL_JOIN[^_].*
+
+# Test SEMI JOIN as well
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+query II
+SELECT * FROM t1 SEMI JOIN t2 ON t1.a < t2.c AND t1.b > t2.c ORDER BY ALL;
+----
+1	25
+3	8
+
+query II
+EXPLAIN SELECT * FROM t1 SEMI JOIN t2 ON t1.a < t2.c AND t1.b > t2.c;
+----
+physical_plan	<REGEX>:.*BLOCKWISE_NL_JOIN_OPTIMIZED.*
+
+statement ok
+RESET operator_memory_optimizations;
+
+# Test with IS DISTINCT FROM which triggers NESTED_LOOP_JOIN
+statement ok
+CREATE TABLE t3(x INT);
+
+statement ok
+CREATE TABLE t4(y INT);
+
+statement ok
+INSERT INTO t3 VALUES (1), (2), (NULL);
+
+statement ok
+INSERT INTO t4 VALUES (1), (2), (NULL);
+
+# Default: uses regular NESTED_LOOP_JOIN
+query II
+EXPLAIN SELECT * FROM t3 INNER JOIN t4 ON t3.x IS DISTINCT FROM t4.y;
+----
+physical_plan	<REGEX>:.*NESTED_LOOP_JOIN[^_].*
+
+# Enable optimizations
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+# With optimization: uses NESTED_LOOP_JOIN_OPTIMIZED
+query II
+EXPLAIN SELECT * FROM t3 INNER JOIN t4 ON t3.x IS DISTINCT FROM t4.y;
+----
+physical_plan	<REGEX>:.*NESTED_LOOP_JOIN_OPTIMIZED.*
+
+# Verify results are correct
+query II rowsort
+SELECT * FROM t3 INNER JOIN t4 ON t3.x IS DISTINCT FROM t4.y;
+----
+1	2
+1	NULL
+2	1
+2	NULL
+NULL	1
+NULL	2
+
+statement ok
+RESET operator_memory_optimizations;

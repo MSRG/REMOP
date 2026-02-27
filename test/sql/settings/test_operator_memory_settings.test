@@ -1,0 +1,307 @@
+# name: test/sql/settings/test_operator_memory_settings.test
+# description: Test operator memory optimization settings (global settings, immutability when enabled)
+# group: [settings]
+
+# Test default values
+query I
+SELECT current_setting('operator_memory_optimizations');
+----
+false
+
+query I
+SELECT current_setting('operator_sort_input_buffer_ratio');
+----
+0.5
+
+query I
+SELECT current_setting('operator_nlj_input_buffer_ratio');
+----
+0.75
+
+query I
+SELECT current_setting('operator_nlj_short_table_buffer_ratio');
+----
+0.5
+
+query I
+SELECT current_setting('operator_nlj_outer_table_buffer_ratio');
+----
+0.5
+
+query I
+SELECT current_setting('operator_kway_merge_k');
+----
+4
+
+query I
+SELECT current_setting('operator_kway_merge_adaptive');
+----
+true
+
+query I
+SELECT current_setting('operator_kway_merge_input_buffer_ratio');
+----
+0.67
+
+# Test setting ratios BEFORE enabling optimizations
+statement ok
+SET GLOBAL operator_sort_input_buffer_ratio=0.3;
+
+statement ok
+SET GLOBAL operator_nlj_input_buffer_ratio=0.4;
+
+statement ok
+SET GLOBAL operator_nlj_short_table_buffer_ratio=0.2;
+
+statement ok
+SET GLOBAL operator_kway_merge_k=4;
+
+statement ok
+SET GLOBAL operator_kway_merge_adaptive=false;
+
+statement ok
+SET GLOBAL operator_kway_merge_input_buffer_ratio=0.7;
+
+query I
+SELECT current_setting('operator_sort_input_buffer_ratio');
+----
+0.3
+
+query I
+SELECT current_setting('operator_nlj_input_buffer_ratio');
+----
+0.4
+
+query I
+SELECT current_setting('operator_nlj_short_table_buffer_ratio');
+----
+0.2
+
+query I
+SELECT current_setting('operator_nlj_outer_table_buffer_ratio');
+----
+0.8
+
+query I
+SELECT current_setting('operator_kway_merge_k');
+----
+4
+
+query I
+SELECT current_setting('operator_kway_merge_adaptive');
+----
+false
+
+query I
+SELECT current_setting('operator_kway_merge_input_buffer_ratio');
+----
+0.7
+
+# Enable optimizations - ratios become locked
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+query I
+SELECT current_setting('operator_memory_optimizations');
+----
+true
+
+# Cannot change ratios while optimizations are enabled
+statement error
+SET GLOBAL operator_sort_input_buffer_ratio=0.6;
+----
+Cannot change operator_sort_input_buffer_ratio while operator_memory_optimizations is enabled
+
+statement error
+SET GLOBAL operator_nlj_input_buffer_ratio=0.7;
+----
+Cannot change operator_nlj_input_buffer_ratio while operator_memory_optimizations is enabled
+
+statement error
+SET GLOBAL operator_nlj_short_table_buffer_ratio=0.8;
+----
+Cannot change operator_nlj_short_table_buffer_ratio while operator_memory_optimizations is enabled
+
+statement error
+SET GLOBAL operator_nlj_outer_table_buffer_ratio=0.8;
+----
+Cannot change operator_nlj_outer_table_buffer_ratio while operator_memory_optimizations is enabled
+
+statement error
+SET GLOBAL operator_kway_merge_k=16;
+----
+Cannot change operator_kway_merge_k while operator_memory_optimizations is enabled
+
+statement error
+SET GLOBAL operator_kway_merge_adaptive=true;
+----
+Cannot change operator_kway_merge_adaptive while operator_memory_optimizations is enabled
+
+statement error
+SET GLOBAL operator_kway_merge_input_buffer_ratio=0.9;
+----
+Cannot change operator_kway_merge_input_buffer_ratio while operator_memory_optimizations is enabled
+
+# Cannot reset ratios while optimizations are enabled
+statement error
+RESET operator_sort_input_buffer_ratio;
+----
+Cannot reset operator_sort_input_buffer_ratio while operator_memory_optimizations is enabled
+
+statement error
+RESET operator_nlj_input_buffer_ratio;
+----
+Cannot reset operator_nlj_input_buffer_ratio while operator_memory_optimizations is enabled
+
+statement error
+RESET operator_nlj_short_table_buffer_ratio;
+----
+Cannot reset operator_nlj_short_table_buffer_ratio while operator_memory_optimizations is enabled
+
+statement error
+RESET operator_nlj_outer_table_buffer_ratio;
+----
+Cannot reset operator_nlj_outer_table_buffer_ratio while operator_memory_optimizations is enabled
+
+statement error
+RESET operator_kway_merge_k;
+----
+Cannot reset operator_kway_merge_k while operator_memory_optimizations is enabled
+
+statement error
+RESET operator_kway_merge_adaptive;
+----
+Cannot reset operator_kway_merge_adaptive while operator_memory_optimizations is enabled
+
+statement error
+RESET operator_kway_merge_input_buffer_ratio;
+----
+Cannot reset operator_kway_merge_input_buffer_ratio while operator_memory_optimizations is enabled
+
+# Values should still be what we set earlier
+query I
+SELECT current_setting('operator_sort_input_buffer_ratio');
+----
+0.3
+
+query I
+SELECT current_setting('operator_nlj_input_buffer_ratio');
+----
+0.4
+
+query I
+SELECT current_setting('operator_nlj_short_table_buffer_ratio');
+----
+0.2
+
+query I
+SELECT current_setting('operator_nlj_outer_table_buffer_ratio');
+----
+0.8
+
+query I
+SELECT current_setting('operator_kway_merge_k');
+----
+4
+
+query I
+SELECT current_setting('operator_kway_merge_adaptive');
+----
+false
+
+query I
+SELECT current_setting('operator_kway_merge_input_buffer_ratio');
+----
+0.7
+
+# Disable optimizations
+statement ok
+SET GLOBAL operator_memory_optimizations=false;
+
+# Now we can change ratios again
+statement ok
+SET GLOBAL operator_sort_input_buffer_ratio=0.6;
+
+query I
+SELECT current_setting('operator_sort_input_buffer_ratio');
+----
+0.6
+
+# Reset to defaults
+statement ok
+RESET operator_sort_input_buffer_ratio;
+
+statement ok
+RESET operator_nlj_input_buffer_ratio;
+
+statement ok
+RESET operator_nlj_short_table_buffer_ratio;
+
+statement ok
+RESET operator_nlj_outer_table_buffer_ratio;
+
+statement ok
+RESET operator_kway_merge_k;
+
+statement ok
+RESET operator_kway_merge_adaptive;
+
+statement ok
+RESET operator_kway_merge_input_buffer_ratio;
+
+query I
+SELECT current_setting('operator_sort_input_buffer_ratio');
+----
+0.5
+
+query I
+SELECT current_setting('operator_nlj_input_buffer_ratio');
+----
+0.75
+
+query I
+SELECT current_setting('operator_nlj_short_table_buffer_ratio');
+----
+0.5
+
+query I
+SELECT current_setting('operator_nlj_outer_table_buffer_ratio');
+----
+0.5
+
+query I
+SELECT current_setting('operator_kway_merge_k');
+----
+4
+
+query I
+SELECT current_setting('operator_kway_merge_adaptive');
+----
+true
+
+query I
+SELECT current_setting('operator_kway_merge_input_buffer_ratio');
+----
+0.67
+
+# Test memory budget setting
+query I
+SELECT current_setting('operator_memory_budget');
+----
+0 (uses memory_limit)
+
+statement ok
+SET GLOBAL operator_memory_budget='1GiB';
+
+query I
+SELECT current_setting('operator_memory_budget');
+----
+1.0 GiB
+
+statement ok
+RESET operator_memory_budget;
+
+query I
+SELECT current_setting('operator_memory_budget');
+----
+0 (uses memory_limit)

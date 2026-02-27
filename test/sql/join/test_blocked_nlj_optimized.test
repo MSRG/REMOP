@@ -1,0 +1,355 @@
+# name: test/sql/join/test_blocked_nlj_optimized.test
+# description: Test blocked nested loop join optimized operator
+# group: [join]
+
+statement ok
+PRAGMA enable_verification
+
+# Enable operator memory optimizations to use the optimized NLJ
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+#===--------------------------------------------------------------------===//
+# Test 1: Basic INNER JOIN with IS DISTINCT FROM (triggers NLJ)
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE lhs_small(a INT, b VARCHAR);
+
+statement ok
+CREATE TABLE rhs_small(c INT, d VARCHAR);
+
+statement ok
+INSERT INTO lhs_small VALUES (1, 'a'), (2, 'b'), (3, 'c'), (NULL, 'd');
+
+statement ok
+INSERT INTO rhs_small VALUES (1, 'x'), (2, 'y'), (NULL, 'z');
+
+# Verify optimized operator is used
+query II
+EXPLAIN SELECT * FROM lhs_small INNER JOIN rhs_small ON lhs_small.a IS DISTINCT FROM rhs_small.c;
+----
+physical_plan	<REGEX>:.*NESTED_LOOP_JOIN_OPTIMIZED.*
+
+# Verify results are correct
+query IIII rowsort
+SELECT * FROM lhs_small INNER JOIN rhs_small ON lhs_small.a IS DISTINCT FROM rhs_small.c;
+----
+1	a	2	y
+1	a	NULL	z
+2	b	1	x
+2	b	NULL	z
+3	c	1	x
+3	c	2	y
+3	c	NULL	z
+NULL	d	1	x
+NULL	d	2	y
+
+#===--------------------------------------------------------------------===//
+# Test 2: Larger dataset to test buffering behavior
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE lhs_medium AS SELECT i AS a, 'val_' || i AS b FROM range(100) t(i);
+
+statement ok
+CREATE TABLE rhs_medium AS SELECT i AS c, 'data_' || i AS d FROM range(50) t(i);
+
+# Test with IS DISTINCT FROM which forces NLJ
+query II
+EXPLAIN SELECT COUNT(*) FROM lhs_medium INNER JOIN rhs_medium ON lhs_medium.a IS DISTINCT FROM rhs_medium.c;
+----
+physical_plan	<REGEX>:.*NESTED_LOOP_JOIN_OPTIMIZED.*
+
+# Count should be 100*50 - 50 (matching pairs) = 4950
+query I
+SELECT COUNT(*) FROM lhs_medium INNER JOIN rhs_medium ON lhs_medium.a IS DISTINCT FROM rhs_medium.c;
+----
+4950
+
+#===--------------------------------------------------------------------===//
+# Test 3: Empty tables handling
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE empty_table(e INT);
+
+# Empty RHS - should return empty result for INNER join
+query I
+SELECT COUNT(*) FROM lhs_small INNER JOIN empty_table ON lhs_small.a IS DISTINCT FROM empty_table.e;
+----
+0
+
+# Empty LHS - should return empty result for INNER join
+query I
+SELECT COUNT(*) FROM empty_table INNER JOIN rhs_small ON empty_table.e IS DISTINCT FROM rhs_small.c;
+----
+0
+
+#===--------------------------------------------------------------------===//
+# Test 4: Test with NULLs in join conditions
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE t_nulls1(v1 INT);
+
+statement ok
+CREATE TABLE t_nulls2(v2 INT);
+
+statement ok
+INSERT INTO t_nulls1 VALUES (1), (2), (NULL), (4);
+
+statement ok
+INSERT INTO t_nulls2 VALUES (2), (NULL), (5);
+
+# IS DISTINCT FROM handles NULLs specially
+query II rowsort
+SELECT * FROM t_nulls1 INNER JOIN t_nulls2 ON v1 IS DISTINCT FROM v2;
+----
+1	2
+1	5
+1	NULL
+2	5
+2	NULL
+4	2
+4	5
+4	NULL
+NULL	2
+NULL	5
+
+#===--------------------------------------------------------------------===//
+# Test 5: Test result ordering consistency with ORDER BY
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE t1(x INT, y INT);
+
+statement ok
+CREATE TABLE t2(p INT, q INT);
+
+statement ok
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+
+statement ok
+INSERT INTO t2 VALUES (1, 10), (2, 20), (3, 30);
+
+query IIII
+SELECT * FROM t1 INNER JOIN t2 ON t1.x IS DISTINCT FROM t2.p ORDER BY t1.x, t1.y, t2.p, t2.q;
+----
+1	10	2	20
+1	10	3	30
+2	20	1	10
+2	20	3	30
+3	30	1	10
+3	30	2	20
+
+#===--------------------------------------------------------------------===//
+# Test 6: Verify correct count with larger tables
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE big_left AS SELECT i AS id FROM range(200) t(i);
+
+statement ok
+CREATE TABLE big_right AS SELECT i AS id FROM range(100) t(i);
+
+# Total combinations - matches = 200*100 - 100 = 19900
+query I
+SELECT COUNT(*) FROM big_left INNER JOIN big_right ON big_left.id IS DISTINCT FROM big_right.id;
+----
+19900
+
+#===--------------------------------------------------------------------===//
+# Test 7: LEFT OUTER JOIN
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE left_tbl(a INT, b VARCHAR);
+
+statement ok
+CREATE TABLE right_tbl(c INT, d VARCHAR);
+
+statement ok
+INSERT INTO left_tbl VALUES (1, 'l1'), (2, 'l2'), (3, 'l3'), (4, 'l4');
+
+statement ok
+INSERT INTO right_tbl VALUES (2, 'r2'), (4, 'r4'), (6, 'r6');
+
+# LEFT JOIN: All LHS rows, with RHS filled with NULL when no match
+# Using = instead of IS DISTINCT FROM for this test
+query IIII rowsort
+SELECT * FROM left_tbl LEFT JOIN right_tbl ON left_tbl.a = right_tbl.c;
+----
+1	l1	NULL	NULL
+2	l2	2	r2
+3	l3	NULL	NULL
+4	l4	4	r4
+
+# LEFT JOIN with IS DISTINCT FROM - returns non-matching pairs, plus NULLs for unmatched LHS
+# Each LHS row matches with RHS rows that have different values
+query IIII rowsort
+SELECT * FROM left_tbl LEFT JOIN right_tbl ON left_tbl.a IS DISTINCT FROM right_tbl.c;
+----
+1	l1	2	r2
+1	l1	4	r4
+1	l1	6	r6
+2	l2	4	r4
+2	l2	6	r6
+3	l3	2	r2
+3	l3	4	r4
+3	l3	6	r6
+4	l4	2	r2
+4	l4	6	r6
+
+#===--------------------------------------------------------------------===//
+# Test 8: RIGHT OUTER JOIN
+#===--------------------------------------------------------------------===//
+
+# RIGHT JOIN: All RHS rows, with LHS filled with NULL when no match
+query IIII rowsort
+SELECT * FROM left_tbl RIGHT JOIN right_tbl ON left_tbl.a = right_tbl.c;
+----
+2	l2	2	r2
+4	l4	4	r4
+NULL	NULL	6	r6
+
+# RIGHT JOIN with IS DISTINCT FROM
+query IIII rowsort
+SELECT * FROM left_tbl RIGHT JOIN right_tbl ON left_tbl.a IS DISTINCT FROM right_tbl.c;
+----
+1	l1	2	r2
+1	l1	4	r4
+1	l1	6	r6
+2	l2	4	r4
+2	l2	6	r6
+3	l3	2	r2
+3	l3	4	r4
+3	l3	6	r6
+4	l4	2	r2
+4	l4	6	r6
+
+#===--------------------------------------------------------------------===//
+# Test 9: FULL OUTER JOIN
+#===--------------------------------------------------------------------===//
+
+# FULL OUTER JOIN: All rows from both sides, NULLs where no match
+query IIII rowsort
+SELECT * FROM left_tbl FULL OUTER JOIN right_tbl ON left_tbl.a = right_tbl.c;
+----
+1	l1	NULL	NULL
+2	l2	2	r2
+3	l3	NULL	NULL
+4	l4	4	r4
+NULL	NULL	6	r6
+
+# FULL OUTER JOIN with IS DISTINCT FROM
+query IIII rowsort
+SELECT * FROM left_tbl FULL OUTER JOIN right_tbl ON left_tbl.a IS DISTINCT FROM right_tbl.c;
+----
+1	l1	2	r2
+1	l1	4	r4
+1	l1	6	r6
+2	l2	4	r4
+2	l2	6	r6
+3	l3	2	r2
+3	l3	4	r4
+3	l3	6	r6
+4	l4	2	r2
+4	l4	6	r6
+
+#===--------------------------------------------------------------------===//
+# Test 10: RIGHT/FULL OUTER JOIN with empty tables
+#===--------------------------------------------------------------------===//
+
+# RIGHT JOIN with empty LHS - all RHS rows with NULL LHS columns
+query III rowsort
+SELECT * FROM empty_table RIGHT JOIN right_tbl ON empty_table.e = right_tbl.c;
+----
+NULL	2	r2
+NULL	4	r4
+NULL	6	r6
+
+# FULL OUTER JOIN with empty LHS
+query III rowsort
+SELECT * FROM empty_table FULL OUTER JOIN right_tbl ON empty_table.e = right_tbl.c;
+----
+NULL	2	r2
+NULL	4	r4
+NULL	6	r6
+
+#===--------------------------------------------------------------------===//
+# Test 11: RIGHT/FULL OUTER JOIN with NULLs
+#===--------------------------------------------------------------------===//
+statement ok
+CREATE TABLE lnulls(x INT);
+
+statement ok
+CREATE TABLE rnulls(y INT);
+
+statement ok
+INSERT INTO lnulls VALUES (1), (2), (NULL);
+
+statement ok
+INSERT INTO rnulls VALUES (2), (3), (NULL);
+
+# RIGHT JOIN - unmatched RHS rows get NULL LHS
+query II rowsort
+SELECT * FROM lnulls RIGHT JOIN rnulls ON lnulls.x = rnulls.y;
+----
+2	2
+NULL	3
+NULL	NULL
+
+# FULL OUTER JOIN - unmatched rows from both sides
+query II rowsort
+SELECT * FROM lnulls FULL OUTER JOIN rnulls ON lnulls.x = rnulls.y;
+----
+1	NULL
+2	2
+NULL	3
+NULL	NULL
+NULL	NULL
+
+#===--------------------------------------------------------------------===//
+# Cleanup
+#===--------------------------------------------------------------------===//
+statement ok
+RESET operator_memory_optimizations;
+
+statement ok
+DROP TABLE lhs_small;
+
+statement ok
+DROP TABLE rhs_small;
+
+statement ok
+DROP TABLE lhs_medium;
+
+statement ok
+DROP TABLE rhs_medium;
+
+statement ok
+DROP TABLE empty_table;
+
+statement ok
+DROP TABLE t_nulls1;
+
+statement ok
+DROP TABLE t_nulls2;
+
+statement ok
+DROP TABLE t1;
+
+statement ok
+DROP TABLE t2;
+
+statement ok
+DROP TABLE big_left;
+
+statement ok
+DROP TABLE big_right;
+
+statement ok
+DROP TABLE left_tbl;
+
+statement ok
+DROP TABLE right_tbl;
+
+statement ok
+DROP TABLE lnulls;
+
+statement ok
+DROP TABLE rnulls;

@@ -1,0 +1,101 @@
+# name: test/sql/order/test_operator_memory_optimizations_order.test
+# description: Test operator memory optimization flag enables optimized order by operator
+# group: [order]
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CREATE TABLE t1 AS SELECT * FROM VALUES (3, 'c'), (1, 'a'), (2, 'b'), (5, 'e'), (4, 'd') t(a, b);
+
+# Default: uses regular ORDER_BY operator
+query II
+EXPLAIN SELECT * FROM t1 ORDER BY a;
+----
+physical_plan	<REGEX>:.*ORDER_BY[^_].*
+
+# Verify result with default operator
+query II
+SELECT * FROM t1 ORDER BY a;
+----
+1	a
+2	b
+3	c
+4	d
+5	e
+
+# Enable operator memory optimizations (now a global setting)
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+# With optimization enabled: uses optimized ORDER_BY_OPTIMIZED operator
+query II
+EXPLAIN SELECT * FROM t1 ORDER BY a;
+----
+physical_plan	<REGEX>:.*ORDER_BY_OPTIMIZED.*
+
+# Results should be identical with optimized operator
+query II
+SELECT * FROM t1 ORDER BY a;
+----
+1	a
+2	b
+3	c
+4	d
+5	e
+
+# Test descending order
+query II
+SELECT * FROM t1 ORDER BY a DESC;
+----
+5	e
+4	d
+3	c
+2	b
+1	a
+
+# Reset and verify it goes back to regular operator
+statement ok
+RESET operator_memory_optimizations;
+
+query II
+EXPLAIN SELECT * FROM t1 ORDER BY a;
+----
+physical_plan	<REGEX>:.*ORDER_BY[^_].*
+
+# Test with multiple order columns
+statement ok
+SET GLOBAL operator_memory_optimizations=true;
+
+statement ok
+CREATE TABLE t2 AS SELECT * FROM VALUES (1, 2, 'a'), (1, 1, 'b'), (2, 1, 'c'), (2, 2, 'd') t(x, y, z);
+
+query III
+SELECT * FROM t2 ORDER BY x, y;
+----
+1	1	b
+1	2	a
+2	1	c
+2	2	d
+
+query II
+EXPLAIN SELECT * FROM t2 ORDER BY x, y;
+----
+physical_plan	<REGEX>:.*ORDER_BY_OPTIMIZED.*
+
+# Test with expressions in ORDER BY
+query III
+SELECT * FROM t2 ORDER BY x + y DESC;
+----
+2	2	d
+1	2	a
+2	1	c
+1	1	b
+
+query II
+EXPLAIN SELECT * FROM t2 ORDER BY x + y DESC;
+----
+physical_plan	<REGEX>:.*ORDER_BY_OPTIMIZED.*
+
+statement ok
+RESET operator_memory_optimizations;
