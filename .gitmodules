@@ -1,4 +1,4 @@
 [submodule "cdb"]
 	path = cdb
-	url = https://github.com/MSRG/cdb.git
-	branch = remon
+	url = https://github.com/MSRG/REMON.git
+	branch = main
